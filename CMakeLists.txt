@@ -53,7 +53,7 @@ find_library(LIB_TTD_RECORDER NAMES TTDLiveRecorder PATHS ${TTD_LIB_DIR} NO_DEFA
 # =========================================================
 # 定义可执行文件
 # =========================================================
-add_executable (Ttd2Trace "Ttd2Trace.cpp" "Ttd2Trace.h")
+add_executable (Ttd2Trace "Ttd2Trace/Ttd2Trace.cpp")
 
 # =========================================================
 # 链接依赖
