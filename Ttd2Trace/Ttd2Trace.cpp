@@ -1,5 +1,5 @@
 ﻿// main.cpp
-// TTD to Trace Trace Converter
+// TTD to Trace Converter
 // Target: x64 Console App
 // Standard: C++20
 
@@ -21,10 +21,12 @@
 #include <optional>
 #include <cassert>
 #include <cwctype>
+
 // TTD Headers
 #include <TTD/IReplayEngineStl.h>
 #include <TTD/IReplayEngineRegisters.h>
 #include <TTD/ErrorReporting.h>
+
 namespace fs = std::filesystem;
 using namespace TTD;
 using namespace TTD::Replay;
@@ -35,63 +37,63 @@ using namespace TTD::Replay;
 
 // 描述目标模块在时间轴上的存在范围
 struct TargetModuleRange {
-        GuestAddress StartAddress;
-        GuestAddress EndAddress;
-        Position LoadTime;
-        Position UnloadTime;
-        std::wstring ModuleName;
+    GuestAddress StartAddress;
+    GuestAddress EndAddress;
+    Position LoadTime;
+    Position UnloadTime;
+    std::wstring ModuleName;
 
-        // 用于排序和二分查找
-        bool operator<(const TargetModuleRange& other) const {
-                return StartAddress < other.StartAddress;
-        }
+    // 用于排序和二分查找
+    bool operator<(const TargetModuleRange& other) const {
+        return StartAddress < other.StartAddress;
+    }
 };
 
 // 描述单个线程的追踪状态
 struct ThreadTraceContext {
-        uint32_t ThreadId;
-        std::ofstream LogFile;
-        std::vector<char> OutputBuffer; // 写缓冲区 (64KB)
-        std::vector<uint64_t> PrevRegValues; // 上一次的寄存器值，用于Diff
-        bool IsFirstLog = true;
+    uint32_t ThreadId;
+    std::ofstream LogFile;
+    std::vector<char> OutputBuffer; // 写缓冲区 (64KB)
+    std::vector<uint64_t> PrevRegValues; // 上一次的寄存器值，用于Diff
+    bool IsFirstLog = true;
 
-        // [Safety] 增加互斥锁，防止 TTD 并行回放同一线程片段时导致 vector 竞争
-        std::mutex Mutex;
+    // [Safety] 增加互斥锁，防止 TTD 并行回放同一线程片段时导致 vector 竞争
+    std::mutex Mutex;
 
-        ThreadTraceContext(uint32_t tid, const fs::path& outDir, const std::wstring& prefix)
-                : ThreadId(tid) {
-                OutputBuffer.reserve(65536);
+    ThreadTraceContext(uint32_t tid, const fs::path& outDir, const std::wstring& prefix)
+        : ThreadId(tid) {
+        OutputBuffer.reserve(65536);
 
-                // 构造文件名: prefix_threadID.log
-                auto filename = std::format(L"{}_{}.log", prefix, tid);
-                fs::path fullPath = outDir / filename;
+        // 构造文件名: prefix_threadID.log
+        auto filename = std::format(L"{}_{}.log", prefix, tid);
+        fs::path fullPath = outDir / filename;
 
-                LogFile.open(fullPath, std::ios::out | std::ios::trunc);
-                if (!LogFile.is_open()) {
-                        std::wcerr << L"Failed to open log file: " << fullPath.c_str() << std::endl;
-                }
+        LogFile.open(fullPath, std::ios::out | std::ios::trunc);
+        if (!LogFile.is_open()) {
+            std::wcerr << L"Failed to open log file: " << fullPath.c_str() << std::endl;
         }
+    }
 
-        ~ThreadTraceContext() {
-                Flush();
-                if (LogFile.is_open()) LogFile.close();
-        }
+    ~ThreadTraceContext() {
+        Flush();
+        if (LogFile.is_open()) LogFile.close();
+    }
 
-        void Flush() {
-                if (!OutputBuffer.empty() && LogFile.is_open()) {
-                        LogFile.write(OutputBuffer.data(), OutputBuffer.size());
-                        OutputBuffer.clear();
-                }
+    void Flush() {
+        if (!OutputBuffer.empty() && LogFile.is_open()) {
+            LogFile.write(OutputBuffer.data(), OutputBuffer.size());
+            OutputBuffer.clear();
         }
+    }
 
-        // 辅助：写入格式化字符串到 Buffer
-        template<typename... Args>
-        void Write(std::format_string<Args...> fmt, Args&&... args) {
-                std::format_to(std::back_inserter(OutputBuffer), fmt, std::forward<Args>(args)...);
-                if (OutputBuffer.size() >= 64 * 1024) {
-                        Flush();
-                }
+    // 辅助：写入格式化字符串到 Buffer
+    template<typename... Args>
+    void Write(std::format_string<Args...> fmt, Args&&... args) {
+        std::format_to(std::back_inserter(OutputBuffer), fmt, std::forward<Args>(args)...);
+        if (OutputBuffer.size() >= 64 * 1024) {
+            Flush();
         }
+    }
 };
 
 // Global Context
@@ -109,96 +111,100 @@ bool g_isX64 = true; // Guest Architecture
 // TTD Error Reporting
 class ConsoleErrorReporting : public ErrorReporting {
 public:
-        void __fastcall VPrintError(_Printf_format_string_ char const* const pFmt, _In_ va_list argList) override {
-                char buffer[2048];
-                vsnprintf(buffer, sizeof(buffer), pFmt, argList);
-                std::cerr << "[TTD Error] " << buffer << std::endl;
-        }
+    void __fastcall VPrintError(_Printf_format_string_ char const* const pFmt, _In_ va_list argList) override {
+        char buffer[2048];
+        vsnprintf(buffer, sizeof(buffer), pFmt, argList);
+        std::cerr << "[TTD Error] " << buffer << std::endl;
+    }
 };
 
 // 大小写不敏感比较 wstring
 bool IsSameModuleName(const std::wstring& a, const std::wstring& b) {
-        if (a.size() != b.size()) return false;
-        return std::equal(a.begin(), a.end(), b.begin(), [](wchar_t c1, wchar_t c2) {
-                return std::towlower(c1) == std::towlower(c2);
-                });
+    if (a.size() != b.size()) return false;
+    return std::equal(a.begin(), a.end(), b.begin(), [](wchar_t c1, wchar_t c2) {
+        return std::towlower(c1) == std::towlower(c2);
+    });
 }
 
 // 解析 TTD 位置字符串 (格式: "Sequence:Steps" 或 "Sequence", 均为十六进制)
 std::optional<Position> ParsePositionString(const std::string& str) {
-        try {
-                uint64_t seq = 0;
-                uint64_t steps = 0;
-                size_t colonPos = str.find(':');
+    try {
+        uint64_t seq = 0;
+        uint64_t steps = 0;
+        size_t colonPos = str.find(':');
 
-                if (colonPos != std::string::npos) {
-                        std::string seqStr = str.substr(0, colonPos);
-                        std::string stepStr = str.substr(colonPos + 1);
-                        if (!seqStr.empty()) seq = std::stoull(seqStr, nullptr, 16);
-                        if (!stepStr.empty()) steps = std::stoull(stepStr, nullptr, 16);
-                }
-                else {
-                        seq = std::stoull(str, nullptr, 16);
-                }
+        if (colonPos != std::string::npos) {
+            std::string seqStr = str.substr(0, colonPos);
+            std::string stepStr = str.substr(colonPos + 1);
+            if (!seqStr.empty()) seq = std::stoull(seqStr, nullptr, 16);
+            if (!stepStr.empty()) steps = std::stoull(stepStr, nullptr, 16);
+        }
+        else {
+            seq = std::stoull(str, nullptr, 16);
+        }
 
-                return Position(static_cast<SequenceId>(seq), static_cast<StepCount>(steps));
-        }
-        catch (...) {
-                return std::nullopt;
-        }
+        return Position(static_cast<SequenceId>(seq), static_cast<StepCount>(steps));
+    }
+    catch (...) {
+        return std::nullopt;
+    }
 }
 
 struct AppConfig {
-        fs::path TracePath;
-        std::set<std::wstring> TargetModules;
-        std::optional<Position> StartPos;
-        std::optional<Position> EndPos;
+    fs::path TracePath;
+    fs::path OutputPath; 
+    std::set<std::wstring> TargetModules;
+    std::optional<Position> StartPos;
+    std::optional<Position> EndPos;
 };
 
 void PrintUsage() {
-        std::cout << "Usage: TtdToTrace.exe -f <trace.run> [-m <module1,module2>] [-s <start_pos>] [-e <end_pos>]\n";
-        std::cout << "Example: TtdToTrace.exe -f trace.run -m target.dll\n";
-        std::cout << "Note: If -m is omitted, ALL modules will be recorded.\n";
+    std::cout << "Usage: TtdToTrace.exe -f <trace.run> [-m <module1,module2>] [-o <output_dir>] [-s <start_pos>] [-e <end_pos>]\n";
+    std::cout << "Example: TtdToTrace.exe -f trace.run -m target.dll -s 10A:0 -e 10B:20 -o D:\\Logs\n";
+    std::cout << "Note: If -m is omitted, ALL modules will be recorded.\n";
 }
 
 std::optional<AppConfig> ParseArgs(int argc, char* argv[]) {
-        if (argc < 3) return std::nullopt;
-        AppConfig config;
-        for (int i = 1; i < argc; ++i) {
-                std::string arg = argv[i];
-                if (arg == "-f" && i + 1 < argc) {
-                        config.TracePath = argv[++i];
-                }
-                else if (arg == "-m" && i + 1 < argc) {
-                        std::string mods = argv[++i];
-                        size_t pos = 0;
-                        while ((pos = mods.find(',')) != std::string::npos) {
-                                std::string token = mods.substr(0, pos);
-                                if (!token.empty()) {
-                                        config.TargetModules.insert(std::filesystem::path(token).wstring());
-                                }
-                                mods.erase(0, pos + 1);
-                        }
-                        if (!mods.empty()) config.TargetModules.insert(std::filesystem::path(mods).wstring());
-                }
-                else if ((arg == "-s" || arg == "--start") && i + 1 < argc) {
-                        config.StartPos = ParsePositionString(argv[++i]);
-                        if (!config.StartPos) {
-                                std::cerr << "[Error] Invalid start position format. Use Hex:Hex (e.g., 12A:0)" << std::endl;
-                                return std::nullopt;
-                        }
-                }
-                else if ((arg == "-e" || arg == "--end") && i + 1 < argc) {
-                        config.EndPos = ParsePositionString(argv[++i]);
-                        if (!config.EndPos) {
-                                std::cerr << "[Error] Invalid end position format." << std::endl;
-                                return std::nullopt;
-                        }
-                }
+    if (argc < 3) return std::nullopt;
+    AppConfig config;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-f" && i + 1 < argc) {
+            config.TracePath = argv[++i];
         }
-        // [Modified] 允许 TargetModules 为空，表示记录所有模块。只有 TracePath 是必须的。
-        if (config.TracePath.empty()) return std::nullopt;
-        return config;
+        else if (arg == "-m" && i + 1 < argc) {
+            std::string mods = argv[++i];
+            size_t pos = 0;
+            while ((pos = mods.find(',')) != std::string::npos) {
+                std::string token = mods.substr(0, pos);
+                if (!token.empty()) {
+                    config.TargetModules.insert(std::filesystem::path(token).wstring());
+                }
+                mods.erase(0, pos + 1);
+            }
+            if (!mods.empty()) config.TargetModules.insert(std::filesystem::path(mods).wstring());
+        }
+        else if (arg == "-o" && i + 1 < argc) {
+            config.OutputPath = argv[++i];
+        }
+        else if (arg == "-s" && i + 1 < argc) {
+            config.StartPos = ParsePositionString(argv[++i]);
+            if (!config.StartPos) {
+                std::cerr << "[Error] Invalid start position format. Use Hex:Hex (e.g., 12A:0)" << std::endl;
+                return std::nullopt;
+            }
+        }
+        else if (arg == "-e" && i + 1 < argc) {
+            config.EndPos = ParsePositionString(argv[++i]);
+            if (!config.EndPos) {
+                std::cerr << "[Error] Invalid end position format." << std::endl;
+                return std::nullopt;
+            }
+        }
+    }
+    // Only TracePath is mandatory
+    if (config.TracePath.empty()) return std::nullopt;
+    return config;
 }
 
 // ============================================================================
@@ -206,99 +212,94 @@ std::optional<AppConfig> ParseArgs(int argc, char* argv[]) {
 // ============================================================================
 
 enum RegIdx64 {
-        RAX = 0, RBX, RCX, RDX, RSI, RDI, RSP, RBP,
-        R8, R9, R10, R11, R12, R13, R14, R15,
-        RIP, EFLAGS,
-        COUNT_64
+    RAX = 0, RBX, RCX, RDX, RSI, RDI, RSP, RBP,
+    R8, R9, R10, R11, R12, R13, R14, R15,
+    RIP, EFLAGS,
+    COUNT_64
 };
 
 enum RegIdx86 {
-        EAX = 0, EBX, ECX, EDX, ESI, EDI, ESP, EBP,
-        EIP, EFLAGS_32,
-        COUNT_86
+    EAX = 0, EBX, ECX, EDX, ESI, EDI, ESP, EBP,
+    EIP, EFLAGS_32,
+    COUNT_86
 };
 
-// [Modified] 增加 pos 参数，在行尾输出 position=seq:step
 void FormatRegistersX64(ThreadTraceContext& ctx, const AMD64_CONTEXT& regs, const Position& pos) {
-        std::vector<uint64_t> currentVals(RegIdx64::COUNT_64);
-        currentVals[RAX] = regs.Rax; currentVals[RBX] = regs.Rbx; currentVals[RCX] = regs.Rcx; currentVals[RDX] = regs.Rdx;
-        currentVals[RSI] = regs.Rsi; currentVals[RDI] = regs.Rdi; currentVals[RSP] = regs.Rsp; currentVals[RBP] = regs.Rbp;
-        currentVals[R8] = regs.R8;   currentVals[R9] = regs.R9;   currentVals[R10] = regs.R10; currentVals[R11] = regs.R11;
-        currentVals[R12] = regs.R12; currentVals[R13] = regs.R13; currentVals[R14] = regs.R14; currentVals[R15] = regs.R15;
-        currentVals[RIP] = regs.Rip; currentVals[EFLAGS] = regs.EFlags;
+    std::vector<uint64_t> currentVals(RegIdx64::COUNT_64);
+    currentVals[RAX] = regs.Rax; currentVals[RBX] = regs.Rbx; currentVals[RCX] = regs.Rcx; currentVals[RDX] = regs.Rdx;
+    currentVals[RSI] = regs.Rsi; currentVals[RDI] = regs.Rdi; currentVals[RSP] = regs.Rsp; currentVals[RBP] = regs.Rbp;
+    currentVals[R8] = regs.R8;   currentVals[R9] = regs.R9;   currentVals[R10] = regs.R10; currentVals[R11] = regs.R11;
+    currentVals[R12] = regs.R12; currentVals[R13] = regs.R13; currentVals[R14] = regs.R14; currentVals[R15] = regs.R15;
+    currentVals[RIP] = regs.Rip; currentVals[EFLAGS] = regs.EFlags;
 
-        const char* names[] = {
-            "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rsp", "rbp",
-            "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
-            "rip", "eflags"
-        };
+    const char* names[] = {
+        "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rsp", "rbp",
+        "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+        "rip", "eflags"
+    };
 
-        bool needComma = false;
+    bool needComma = false;
 
-        if (ctx.IsFirstLog || ctx.PrevRegValues.size() != RegIdx64::COUNT_64) {
-                ctx.PrevRegValues.resize(RegIdx64::COUNT_64, 0);
-                for (int i = 0; i < RegIdx64::COUNT_64; ++i) {
-                        if (needComma) ctx.Write(",{}", "");
-                        ctx.Write("{}={:x}", names[i], currentVals[i]);
-                        needComma = true;
-                }
-                ctx.IsFirstLog = false;
+    if (ctx.IsFirstLog || ctx.PrevRegValues.size() != RegIdx64::COUNT_64) {
+        ctx.PrevRegValues.resize(RegIdx64::COUNT_64, 0);
+        for (int i = 0; i < RegIdx64::COUNT_64; ++i) {
+            if (needComma) ctx.Write(",{}", "");
+            ctx.Write("{}={:x}", names[i], currentVals[i]);
+            needComma = true;
         }
-        else {
-                for (int i = 0; i < RegIdx64::COUNT_64; ++i) {
-                        if (i == RegIdx64::RIP || currentVals[i] != ctx.PrevRegValues[i]) {
-                                if (needComma) ctx.Write(",{}", "");
-                                ctx.Write("{}={:x}", names[i], currentVals[i]);
-                                needComma = true;
-                        }
-                }
+        ctx.IsFirstLog = false;
+    }
+    else {
+        for (int i = 0; i < RegIdx64::COUNT_64; ++i) {
+            if (i == RegIdx64::RIP || currentVals[i] != ctx.PrevRegValues[i]) {
+                if (needComma) ctx.Write(",{}", "");
+                ctx.Write("{}={:x}", names[i], currentVals[i]);
+                needComma = true;
+            }
         }
+    }
 
-        // [New] 追加 Position 信息
-        ctx.Write(",position={:x}:{:x}", static_cast<uint64_t>(pos.Sequence), static_cast<uint64_t>(pos.Steps));
-
-        ctx.Write("\n", "");
-        ctx.PrevRegValues = currentVals;
+    ctx.Write(",position={:x}:{:x}", static_cast<uint64_t>(pos.Sequence), static_cast<uint64_t>(pos.Steps));
+    ctx.Write("\n", "");
+    ctx.PrevRegValues = currentVals;
 }
 
-// [Modified] 增加 pos 参数
 void FormatRegistersX86(ThreadTraceContext& ctx, const X86_NT5_CONTEXT& regs, const Position& pos) {
-        std::vector<uint64_t> currentVals(RegIdx86::COUNT_86);
-        currentVals[EAX] = regs.Eax; currentVals[EBX] = regs.Ebx; currentVals[ECX] = regs.Ecx; currentVals[EDX] = regs.Edx;
-        currentVals[ESI] = regs.Esi; currentVals[EDI] = regs.Edi; currentVals[ESP] = regs.Esp; currentVals[EBP] = regs.Ebp;
-        currentVals[EIP] = regs.Eip; currentVals[EFLAGS_32] = regs.EFlags;
+    std::vector<uint64_t> currentVals(RegIdx86::COUNT_86);
+    currentVals[EAX] = regs.Eax; currentVals[EBX] = regs.Ebx; currentVals[ECX] = regs.Ecx; currentVals[EDX] = regs.Edx;
+    currentVals[ESI] = regs.Esi; currentVals[EDI] = regs.Edi; currentVals[ESP] = regs.Esp; currentVals[EBP] = regs.Ebp;
+    currentVals[EIP] = regs.Eip; currentVals[EFLAGS_32] = regs.EFlags;
 
-        const char* names[] = {
-            "eax", "ebx", "ecx", "edx", "esi", "edi", "esp", "ebp",
-            "eip", "eflags"
-        };
+    const char* names[] = {
+        "eax", "ebx", "ecx", "edx", "esi", "edi", "esp", "ebp",
+        "eip", "eflags"
+    };
 
-        bool needComma = false;
+    bool needComma = false;
 
-        if (ctx.IsFirstLog || ctx.PrevRegValues.size() != RegIdx86::COUNT_86) {
-                ctx.PrevRegValues.resize(RegIdx86::COUNT_86, 0);
-                for (int i = 0; i < RegIdx86::COUNT_86; ++i) {
-                        if (needComma) ctx.Write(",{}", "");
-                        ctx.Write("{}={:x}", names[i], currentVals[i]);
-                        needComma = true;
-                }
-                ctx.IsFirstLog = false;
+    if (ctx.IsFirstLog || ctx.PrevRegValues.size() != RegIdx86::COUNT_86) {
+        ctx.PrevRegValues.resize(RegIdx86::COUNT_86, 0);
+        for (int i = 0; i < RegIdx86::COUNT_86; ++i) {
+            if (needComma) ctx.Write(",{}", "");
+            ctx.Write("{}={:x}", names[i], currentVals[i]);
+            needComma = true;
         }
-        else {
-                for (int i = 0; i < RegIdx86::COUNT_86; ++i) {
-                        if (i == RegIdx86::EIP || currentVals[i] != ctx.PrevRegValues[i]) {
-                                if (needComma) ctx.Write(",{}", "");
-                                ctx.Write("{}={:x}", names[i], currentVals[i]);
-                                needComma = true;
-                        }
-                }
+        ctx.IsFirstLog = false;
+    }
+    else {
+        for (int i = 0; i < RegIdx86::COUNT_86; ++i) {
+            if (i == RegIdx86::EIP || currentVals[i] != ctx.PrevRegValues[i]) {
+                if (needComma) ctx.Write(",{}", "");
+                ctx.Write("{}={:x}", names[i], currentVals[i]);
+                needComma = true;
+            }
         }
+    }
 
-        // [New] 追加 Position 信息
-        ctx.Write(",position={:x}:{:x}", static_cast<uint64_t>(pos.Sequence), static_cast<uint64_t>(pos.Steps));
+    ctx.Write(",position={:x}:{:x}", static_cast<uint64_t>(pos.Sequence), static_cast<uint64_t>(pos.Steps));
 
-        ctx.Write("\n", "");
-        ctx.PrevRegValues = currentVals;
+    ctx.Write("\n", "");
+    ctx.PrevRegValues = currentVals;
 }
 
 // ============================================================================
@@ -306,81 +307,81 @@ void FormatRegistersX86(ThreadTraceContext& ctx, const X86_NT5_CONTEXT& regs, co
 // ============================================================================
 
 void ProcessHit(IThreadView* threadView) {
-        uint32_t tid = static_cast<uint32_t>(threadView->GetThreadInfo().UniqueId);
-        ThreadTraceContext* ctx = nullptr;
+    uint32_t tid = static_cast<uint32_t>(threadView->GetThreadInfo().UniqueId);
+    ThreadTraceContext* ctx = nullptr;
 
-        // 1. 获取 ThreadContext (Shared Lock)
-        {
-                std::shared_lock<std::shared_mutex> readLock(g_threadMutex);
-                auto it = g_threadContexts.find(tid);
-                if (it != g_threadContexts.end()) {
-                        ctx = it->second.get();
-                }
+    // 获取 ThreadContext (Shared Lock)
+    {
+        std::shared_lock<std::shared_mutex> readLock(g_threadMutex);
+        auto it = g_threadContexts.find(tid);
+        if (it != g_threadContexts.end()) {
+            ctx = it->second.get();
         }
+    }
 
-        // Lazy Create (Unique Lock)
-        if (!ctx) {
-                std::unique_lock<std::shared_mutex> writeLock(g_threadMutex);
-                auto it = g_threadContexts.find(tid);
-                if (it != g_threadContexts.end()) {
-                        ctx = it->second.get();
-                }
-                else {
-                        auto newCtx = std::make_unique<ThreadTraceContext>(tid, g_outputDir, g_tracePrefix);
-                        ctx = newCtx.get();
-                        g_threadContexts[tid] = std::move(newCtx);
-                        std::cout << "\n[Info] New thread detected: " << tid << ", creating log file." << std::endl;
-                }
-        }
-
-        // [Safety] 锁住 Context 防止 vector 并发写崩溃
-        std::lock_guard<std::mutex> contextLock(ctx->Mutex);
-
-        RegisterContext regCtx = threadView->GetCrossPlatformContext();
-
-        // [Modified] 获取当前位置并传递给 Format 函数
-        Position currentPos = threadView->GetPosition();
-
-        if (g_isX64) {
-                const AMD64_CONTEXT* regs = reinterpret_cast<const AMD64_CONTEXT*>(&regCtx);
-                FormatRegistersX64(*ctx, *regs, currentPos);
+    // Lazy Create (Unique Lock)
+    if (!ctx) {
+        std::unique_lock<std::shared_mutex> writeLock(g_threadMutex);
+        auto it = g_threadContexts.find(tid);
+        if (it != g_threadContexts.end()) {
+            ctx = it->second.get();
         }
         else {
-                const X86_NT5_CONTEXT* regs = reinterpret_cast<const X86_NT5_CONTEXT*>(&regCtx);
-                FormatRegistersX86(*ctx, *regs, currentPos);
+            auto newCtx = std::make_unique<ThreadTraceContext>(tid, g_outputDir, g_tracePrefix);
+            ctx = newCtx.get();
+            g_threadContexts[tid] = std::move(newCtx);
+            std::cout << "\n[Info] New thread detected: " << tid << ", creating log file." << std::endl;
         }
+    }
+
+    // 锁住 Context 防止 vector 并发写崩溃
+    std::lock_guard<std::mutex> contextLock(ctx->Mutex);
+
+    RegisterContext regCtx = threadView->GetCrossPlatformContext();
+
+    // 获取当前位置并传递给 Format 函数
+    Position currentPos = threadView->GetPosition();
+
+    if (g_isX64) {
+        const AMD64_CONTEXT* regs = reinterpret_cast<const AMD64_CONTEXT*>(&regCtx);
+        FormatRegistersX64(*ctx, *regs, currentPos);
+    }
+    else {
+        const X86_NT5_CONTEXT* regs = reinterpret_cast<const X86_NT5_CONTEXT*>(&regCtx);
+        FormatRegistersX86(*ctx, *regs, currentPos);
+    }
 }
 
 // 核心回调
 bool __fastcall MemoryWatchpointCallback(
-        uintptr_t /*context*/,
-        const ICursorView::MemoryWatchpointResult& result,
-        const IThreadView* threadView)
+    uintptr_t /*context*/,
+    const ICursorView::MemoryWatchpointResult& result,
+    const IThreadView* threadView)
 {
-        GuestAddress pc = threadView->GetProgramCounter();
-        Position currentPos = threadView->GetPosition();
+    GuestAddress pc = threadView->GetProgramCounter();
+    Position currentPos = threadView->GetPosition();
 
-        // 1. 空间查找
-        TargetModuleRange searchKey;
-        searchKey.StartAddress = pc;
+    // 1. 空间查找
+    TargetModuleRange searchKey;
+    searchKey.StartAddress = pc;
 
-        auto it = std::upper_bound(g_targetRanges.begin(), g_targetRanges.end(), searchKey);
+    auto it = std::upper_bound(g_targetRanges.begin(), g_targetRanges.end(), searchKey);
 
-        if (it == g_targetRanges.begin()) return false;
+    if (it == g_targetRanges.begin()) return false;
 
-        const auto& candidate = *std::prev(it);
+    const auto& candidate = *std::prev(it);
 
-        // 2. 空间校验
-        if (pc >= candidate.StartAddress && pc < candidate.EndAddress) {
-                // 3. 时间校验
-                if (currentPos >= candidate.LoadTime && currentPos < candidate.UnloadTime) {
-                        // Hit!
-                        ProcessHit(const_cast<IThreadView*>(threadView));
-                        return false;
-                }
+    // 2. 空间校验
+    if (pc >= candidate.StartAddress && pc < candidate.EndAddress) {
+        // 3. 时间校验
+        if (currentPos >= candidate.LoadTime && currentPos < candidate.UnloadTime) {
+            // Hit!
+            ProcessHit(const_cast<IThreadView*>(threadView));
+            return false;
         }
+    }
 
-        return false;
+    return false;
 }
 
 // ============================================================================
@@ -388,159 +389,168 @@ bool __fastcall MemoryWatchpointCallback(
 // ============================================================================
 
 int main(int argc, char* argv[]) {
-        // 1. Parse Args
-        auto configOpt = ParseArgs(argc, argv);
-        if (!configOpt) {
-                PrintUsage();
-                return 1;
+    // 1. Parse Args
+    auto configOpt = ParseArgs(argc, argv);
+    if (!configOpt) {
+        PrintUsage();
+        return 1;
+    }
+    const auto& config = *configOpt;
+    
+    if (!config.OutputPath.empty()) {
+        if (!fs::exists(config.OutputPath)) {
+            std::cerr << "[Error] Output directory does not exist: " << config.OutputPath << std::endl;
+            return -1;
         }
-        const auto& config = *configOpt;
+        g_outputDir = config.OutputPath;
+    } else {
+        // Default to trace file's parent path
         g_outputDir = config.TracePath.parent_path();
-        g_tracePrefix = config.TracePath.stem().wstring();
+    }
+    
+    g_tracePrefix = config.TracePath.stem().wstring();
 
-        std::cout << "[Init] Loading trace: " << config.TracePath << std::endl;
+    std::cout << "[Init] Loading trace: " << config.TracePath << std::endl;
 
-        // 2. Init Engine
-        auto [enginePtr, hr] = MakeReplayEngine();
-        if (hr != S_OK || !enginePtr) {
-                std::cerr << "[Error] Failed to create replay engine. HRESULT: " << std::hex << hr << std::endl;
-                return -1;
-        }
+    // 2. Init Engine
+    auto [enginePtr, hr] = MakeReplayEngine();
+    if (hr != S_OK || !enginePtr) {
+        std::cerr << "[Error] Failed to create replay engine. HRESULT: " << std::hex << hr << std::endl;
+        return -1;
+    }
 
-        ConsoleErrorReporting errorRep;
-        enginePtr->RegisterDebugModeAndLogging(DebugModeType::None, &errorRep);
+    ConsoleErrorReporting errorRep;
+    enginePtr->RegisterDebugModeAndLogging(DebugModeType::None, &errorRep);
 
-        if (!enginePtr->Initialize(config.TracePath.c_str())) {
-                std::cerr << "[Error] Failed to initialize trace file." << std::endl;
-                return -1;
-        }
+    if (!enginePtr->Initialize(config.TracePath.c_str())) {
+        std::cerr << "[Error] Failed to initialize trace file." << std::endl;
+        return -1;
+    }
 
-        // 3. Check Architecture
-        const auto& sysInfo = enginePtr->GetSystemInfo();
-        if (sysInfo.System.ProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64) {
-                g_isX64 = true;
-                std::cout << "[Arch] Detected x64 Guest." << std::endl;
-        }
-        else if (sysInfo.System.ProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL) {
-                g_isX64 = false;
-                std::cout << "[Arch] Detected x86 Guest." << std::endl;
+    // 3. Check Architecture
+    const auto& sysInfo = enginePtr->GetSystemInfo();
+    if (sysInfo.System.ProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64) {
+        g_isX64 = true;
+        std::cout << "[Arch] Detected x64 Guest." << std::endl;
+    }
+    else if (sysInfo.System.ProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL) {
+        g_isX64 = false;
+        std::cout << "[Arch] Detected x86 Guest." << std::endl;
+    }
+    else {
+        std::cerr << "[Error] Unsupported architecture (ARM/ARM64 or Unknown)." << std::endl;
+        return -1;
+    }
+
+    // 4. Pre-scan Modules
+    std::cout << "[Scan] Scanning module instances..." << std::endl;
+    auto moduleCount = enginePtr->GetModuleInstanceCount();
+    auto moduleList = enginePtr->GetModuleInstanceList();
+
+    // Check if recording all modules
+    bool recordAllModules = config.TargetModules.empty();
+    if (recordAllModules) {
+        std::cout << "[Config] No modules specified. Recording ALL modules." << std::endl;
+    }
+
+    for (size_t i = 0; i < moduleCount; ++i) {
+        const auto& instance = moduleList[i];
+        std::wstring modName = instance.pModule->pName;
+        std::wstring baseName = std::filesystem::path(modName).filename().wstring();
+
+        // Check target list
+        bool isTarget = false;
+        if (recordAllModules) {
+            isTarget = true;
         }
         else {
-                std::cerr << "[Error] Unsupported architecture (ARM/ARM64 or Unknown)." << std::endl;
-                return -1;
-        }
-
-        // 4. Pre-scan Modules
-        std::cout << "[Scan] Scanning module instances..." << std::endl;
-        auto moduleCount = enginePtr->GetModuleInstanceCount();
-        auto moduleList = enginePtr->GetModuleInstanceList();
-
-        // [New] 检查是否记录所有模块
-        bool recordAllModules = config.TargetModules.empty();
-        if (recordAllModules) {
-                std::cout << "[Config] No modules specified. Recording ALL modules." << std::endl;
-        }
-
-        for (size_t i = 0; i < moduleCount; ++i) {
-                const auto& instance = moduleList[i];
-                std::wstring modName = instance.pModule->pName;
-                std::wstring baseName = std::filesystem::path(modName).filename().wstring();
-
-                // Check target list
-                bool isTarget = false;
-                if (recordAllModules) {
-                        isTarget = true;
+            for (const auto& target : config.TargetModules) {
+                if (IsSameModuleName(target, baseName) || IsSameModuleName(target, modName)) {
+                    isTarget = true;
+                    break;
                 }
-                else {
-                        for (const auto& target : config.TargetModules) {
-                                if (IsSameModuleName(target, baseName) || IsSameModuleName(target, modName)) {
-                                        isTarget = true;
-                                        break;
-                                }
-                        }
-                }
-
-                if (isTarget) {
-                        TargetModuleRange range;
-                        range.StartAddress = instance.pModule->Address;
-                        range.EndAddress = instance.pModule->Address + instance.pModule->Size;
-                        range.LoadTime = instance.LoadTime;
-                        range.UnloadTime = instance.UnloadTime;
-                        range.ModuleName = baseName;
-
-                        g_targetRanges.push_back(range);
-
-                        // 如果记录所有模块，打印可能会太多，只在指定模块模式下详细打印，或者接受刷屏
-                        // 这里选择始终打印，方便用户核对 ASLR
-                        std::wcout << L"[ASLR Hint] Module: " << baseName
-                                << L" | Base: 0x" << std::hex << static_cast<uint64_t>(range.StartAddress)
-                                << L" | Size: 0x" << instance.pModule->Size
-                                << L" | Time: " << static_cast<uint64_t>(range.LoadTime.Sequence) << L" -> " << static_cast<uint64_t>(range.UnloadTime.Sequence)
-                                << std::dec << std::endl;
-                }
+            }
         }
 
-        if (g_targetRanges.empty()) {
-                std::cerr << "[Error] None of the specified modules were found in the trace!" << std::endl;
-                return -1;
-        }
+        if (isTarget) {
+            TargetModuleRange range;
+            range.StartAddress = instance.pModule->Address;
+            range.EndAddress = instance.pModule->Address + instance.pModule->Size;
+            range.LoadTime = instance.LoadTime;
+            range.UnloadTime = instance.UnloadTime;
+            range.ModuleName = baseName;
 
-        std::sort(g_targetRanges.begin(), g_targetRanges.end());
+            g_targetRanges.push_back(range);
 
-        // 5. Setup Cursor & Watchpoints
-        auto cursor = enginePtr->NewCursor();
-        cursor->SetReplayFlags(ReplayFlags::ReplayAllSegmentsWithoutFiltering);
-
-        std::cout << "[Setup] Setting memory watchpoints on " << g_targetRanges.size() << " ranges..." << std::endl;
-
-        for (const auto& range : g_targetRanges) {
-                MemoryWatchpointData wp;
-                wp.Address = range.StartAddress;
-                wp.Size = static_cast<uint64_t>(range.EndAddress - range.StartAddress);
-                wp.AccessMask = DataAccessMask::Execute;
-
-                cursor->AddMemoryWatchpoint(wp);
-        }
-
-        // Determine Replay Range
-        Position traceFirst = enginePtr->GetFirstPosition();
-        Position traceLast = enginePtr->GetLastPosition();
-        Position replayStart = traceFirst;
-        Position replayEnd = traceLast;
-
-        // Override with user args
-        if (config.StartPos.has_value()) {
-                if (*config.StartPos > traceFirst) replayStart = *config.StartPos;
-        }
-        if (config.EndPos.has_value()) {
-                if (*config.EndPos < traceLast) replayEnd = *config.EndPos;
-        }
-
-        if (replayStart >= replayEnd) {
-                std::cerr << "[Error] Start position must be less than end position." << std::endl;
-                return -1;
-        }
-
-        cursor->SetMemoryWatchpointCallback(MemoryWatchpointCallback, 0);
-        // [Removed] ProgressCallback is not registered
-
-        std::cout << "[Run] Starting replay... (Output dir: " << g_outputDir << ")" << std::endl;
-        // Debug print range
-        std::cout << "[Debug] Replay Range: "
-                << std::hex << static_cast<uint64_t>(replayStart.Sequence) << ":" << static_cast<uint64_t>(replayStart.Steps)
-                << " -> "
-                << static_cast<uint64_t>(replayEnd.Sequence) << ":" << static_cast<uint64_t>(replayEnd.Steps)
+            std::wcout << L"[ASLR Hint] Module: " << baseName
+                << L" | Base: 0x" << std::hex << static_cast<uint64_t>(range.StartAddress)
+                << L" | Size: 0x" << instance.pModule->Size
+                << L" | Time: " << static_cast<uint64_t>(range.LoadTime.Sequence) << L" -> " << static_cast<uint64_t>(range.UnloadTime.Sequence)
                 << std::dec << std::endl;
+        }
+    }
 
-        // Start from user specified position
-        cursor->SetPosition(replayStart);
+    if (g_targetRanges.empty()) {
+        std::cerr << "[Error] None of the specified modules were found in the trace!" << std::endl;
+        return -1;
+    }
 
-        // Run until user specified end position
-        auto result = cursor->ReplayForward(replayEnd, StepCount::Max);
+    std::sort(g_targetRanges.begin(), g_targetRanges.end());
 
-        std::cout << "\n[Done] Replay finished. Stop reason: " << (int)result.StopReason << std::endl;
+    // 5. Setup Cursor & Watchpoints
+    auto cursor = enginePtr->NewCursor();
+    cursor->SetReplayFlags(ReplayFlags::ReplayAllSegmentsWithoutFiltering);
 
-        g_threadContexts.clear();
+    std::cout << "[Setup] Setting memory watchpoints on " << g_targetRanges.size() << " ranges..." << std::endl;
 
-        return 0;
+    for (const auto& range : g_targetRanges) {
+        MemoryWatchpointData wp;
+        wp.Address = range.StartAddress;
+        wp.Size = static_cast<uint64_t>(range.EndAddress - range.StartAddress);
+        wp.AccessMask = DataAccessMask::Execute;
+
+        cursor->AddMemoryWatchpoint(wp);
+    }
+
+    // Determine Replay Range
+    Position traceFirst = enginePtr->GetFirstPosition();
+    Position traceLast = enginePtr->GetLastPosition();
+    Position replayStart = traceFirst;
+    Position replayEnd = traceLast;
+
+    // Override with user args
+    if (config.StartPos.has_value()) {
+        if (*config.StartPos > traceFirst) replayStart = *config.StartPos;
+    }
+    if (config.EndPos.has_value()) {
+        if (*config.EndPos < traceLast) replayEnd = *config.EndPos;
+    }
+
+    if (replayStart >= replayEnd) {
+        std::cerr << "[Error] Start position must be less than end position." << std::endl;
+        return -1;
+    }
+
+    cursor->SetMemoryWatchpointCallback(MemoryWatchpointCallback, 0);
+    // [Removed] ProgressCallback is not registered
+
+    std::cout << "[Run] Starting replay... (Output dir: " << g_outputDir << ")" << std::endl;
+    // Debug print range
+    std::cout << "[Debug] Replay Range: "
+        << std::hex << static_cast<uint64_t>(replayStart.Sequence) << ":" << static_cast<uint64_t>(replayStart.Steps)
+        << " -> "
+        << static_cast<uint64_t>(replayEnd.Sequence) << ":" << static_cast<uint64_t>(replayEnd.Steps)
+        << std::dec << std::endl;
+
+    // Start from user specified position
+    cursor->SetPosition(replayStart);
+
+    // Run until user specified end position
+    auto result = cursor->ReplayForward(replayEnd, StepCount::Max);
+
+    std::cout << "\n[Done] Replay finished. Stop reason: " << (int)result.StopReason << std::endl;
+
+    g_threadContexts.clear();
+
+    return 0;
 }
