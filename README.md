@@ -1,5 +1,7 @@
 # Ttd2Trace
 
+[English](README-en.md) / [中文](README.md)
+
 从 TTD (Time Travel Debugging) 录制文件中提取程序执行过程的寄存器追踪记录，并导出为可分析的日志文件。
 
 ## 功能特性
