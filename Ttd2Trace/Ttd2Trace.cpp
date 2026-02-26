@@ -56,6 +56,7 @@ struct ThreadTraceContext {
     std::vector<char> OutputBuffer; // Write buffer (64KB)
     std::vector<uint64_t> PrevRegValues; // Previous register values, used for Diff
     bool IsFirstLog = true;
+    bool IsLogAvailable = false;
 
     // [Safety] Add mutex to prevent vector race conditions during TTD parallel replay of same thread segments
     std::mutex Mutex;
@@ -69,7 +70,8 @@ struct ThreadTraceContext {
         fs::path fullPath = outDir / filename;
 
         LogFile.open(fullPath, std::ios::out | std::ios::trunc);
-        if (!LogFile.is_open()) {
+        IsLogAvailable = LogFile.is_open();
+        if (!IsLogAvailable) {
             std::wcerr << L"Failed to open log file: " << fullPath.c_str() << std::endl;
         }
     }
@@ -80,8 +82,21 @@ struct ThreadTraceContext {
     }
 
     void Flush() {
+        if (OutputBuffer.empty()) return;
+
+        if (!IsLogAvailable || !LogFile.is_open()) {
+            // Drop pending data to avoid unbounded memory growth when output stream is unavailable.
+            OutputBuffer.clear();
+            return;
+        }
+
         if (!OutputBuffer.empty() && LogFile.is_open()) {
             LogFile.write(OutputBuffer.data(), OutputBuffer.size());
+            if (!LogFile.good()) {
+                IsLogAvailable = false;
+                std::cerr << "[Error] Failed while writing log file for thread " << ThreadId
+                    << ". Further writes for this thread will be discarded." << std::endl;
+            }
             OutputBuffer.clear();
         }
     }
@@ -89,6 +104,8 @@ struct ThreadTraceContext {
     // Helper: Write formatted string to Buffer
     template<typename... Args>
     void Write(std::format_string<Args...> fmt, Args&&... args) {
+        if (!IsLogAvailable || !LogFile.is_open()) return;
+
         std::format_to(std::back_inserter(OutputBuffer), fmt, std::forward<Args>(args)...);
         if (OutputBuffer.size() >= 64 * 1024) {
             Flush();
